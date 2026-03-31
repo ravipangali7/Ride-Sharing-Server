@@ -1,7 +1,7 @@
 import uuid as _uuid
 from decimal import Decimal
 
-from django.db import models as dj_models
+from django.db import models as dj_models, transaction
 from django.db.models import Count, F, Sum
 from django.http import Http404
 from django.utils import timezone
@@ -207,6 +207,38 @@ ANNOTATION_REGISTRY = {
 _FILTER_SKIP_PARAMS = frozenset({"page", "page_size", "q", "ordering", "status"})
 
 
+def _allowed_user_roles():
+    role_field = models.UserRole._meta.get_field("role")
+    return {choice[0] for choice in role_field.choices}
+
+
+def _get_user_roles(user_id):
+    return list(
+        models.UserRole.objects.filter(user_id=user_id, is_active=True)
+        .values_list("role", flat=True)
+        .order_by("created_at")
+    )
+
+
+def _sync_user_roles(user, roles):
+    if roles is None:
+        return
+    desired = [r for r in roles if isinstance(r, str)]
+    desired_set = set(desired) & _allowed_user_roles()
+    existing_qs = models.UserRole.objects.filter(user=user)
+    existing_map = {row.role: row for row in existing_qs}
+    for role, row in existing_map.items():
+        if role in desired_set:
+            if not row.is_active:
+                row.is_active = True
+                row.save(update_fields=["is_active"])
+        else:
+            row.delete()
+    for role in desired_set:
+        if role not in existing_map:
+            models.UserRole.objects.create(user=user, role=role, is_active=True)
+
+
 def _serialize_item(obj, extra_annotation_keys=None):
     """Convert a model instance to a JSON-safe dict.
 
@@ -241,6 +273,8 @@ def _serialize_item(obj, extra_annotation_keys=None):
             val = str(val)
         result[key] = val
 
+    if obj._meta.model_name == "user":
+        result["roles"] = _get_user_roles(obj.pk)
     return result
 
 
@@ -343,9 +377,14 @@ def generic_list_view(request, resource):
     if request.method == "POST":
         allowed = _writable_fields(model_cls)
         fk_map = _fk_attname_map(model_cls)
-        data = _remap_fk_fields(request.data, fk_map, allowed)
+        payload = dict(request.data)
+        role_values = payload.pop("roles", None) if resource == "users" else None
+        data = _remap_fk_fields(payload, fk_map, allowed)
         try:
-            obj = model_cls.objects.create(**data)
+            with transaction.atomic():
+                obj = model_cls.objects.create(**data)
+                if resource == "users":
+                    _sync_user_roles(obj, role_values)
             return Response(_serialize_item(obj), status=201)
         except Exception as exc:
             return Response({"error": str(exc)}, status=400)
@@ -405,8 +444,11 @@ def generic_detail_view(request, resource, pk):
     if request.method == "PATCH":
         allowed = _writable_fields(model_cls)
         fk_map = _fk_attname_map(model_cls)
+        role_values = request.data.get("roles") if resource == "users" else None
         update_fields = []
         for key, value in request.data.items():
+            if resource == "users" and key == "roles":
+                continue
             if key in fk_map:
                 attname = fk_map[key]
                 setattr(obj, attname, value)
@@ -415,7 +457,10 @@ def generic_detail_view(request, resource, pk):
                 setattr(obj, key, value)
                 update_fields.append(key)
         try:
-            obj.save(update_fields=update_fields if update_fields else None)
+            with transaction.atomic():
+                obj.save(update_fields=update_fields if update_fields else None)
+                if resource == "users":
+                    _sync_user_roles(obj, role_values)
             return Response(_serialize_item(obj))
         except Exception as exc:
             return Response({"error": str(exc)}, status=400)
@@ -425,6 +470,44 @@ def generic_detail_view(request, resource, pk):
         return Response(status=204)
 
     return Response(_serialize_item(obj))
+
+
+@api_view(["POST"])
+def user_adjust_coins_view(request, pk):
+    user = models.User.objects.filter(pk=pk).first()
+    if not user:
+        raise Http404("Not found")
+
+    try:
+        amount = int(request.data.get("amount", 0))
+    except (TypeError, ValueError):
+        return Response({"error": "amount must be an integer"}, status=400)
+    reason = str(request.data.get("reason", "")).strip()
+
+    if amount == 0:
+        return Response({"error": "amount must be non-zero"}, status=400)
+    if amount < 0 and int(user.coin_balance) + amount < 0:
+        return Response({"error": "insufficient coin balance"}, status=400)
+
+    try:
+        with transaction.atomic():
+            tx = models.CoinTransaction.objects.create(
+                user=user,
+                transaction_type="admin_adjust",
+                coins=amount,
+                source="admin",
+                note=reason,
+            )
+            user.refresh_from_db(fields=["coin_balance"])
+        return Response(
+            {
+                "user_id": str(user.pk),
+                "coin_balance": int(user.coin_balance),
+                "transaction_id": str(tx.pk),
+            }
+        )
+    except Exception as exc:
+        return Response({"error": str(exc)}, status=400)
 
 
 # ─── Aggregated Stats ─────────────────────────────────────────────────────────
