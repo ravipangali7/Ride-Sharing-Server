@@ -204,7 +204,30 @@ ANNOTATION_REGISTRY = {
 }
 
 # Query params that are NOT interpreted as field filters
-_FILTER_SKIP_PARAMS = frozenset({"page", "page_size", "q", "ordering", "status"})
+_FILTER_SKIP_PARAMS = frozenset({"page", "page_size", "q", "search", "ordering", "status"})
+
+# Allowed ORM suffixes for direct (non-FK) fields, e.g. monthly_rent__gte
+_ALLOWED_DIRECT_LOOKUP_SUFFIXES = frozenset(
+    {
+        "gte",
+        "lte",
+        "gt",
+        "lt",
+        "exact",
+        "iexact",
+        "contains",
+        "icontains",
+        "startswith",
+        "istartswith",
+        "endswith",
+        "iendswith",
+        "isnull",
+        "year",
+        "month",
+        "day",
+        "date",
+    }
+)
 
 
 def _allowed_user_roles():
@@ -309,7 +332,7 @@ def _apply_search(qs, model_cls, query):
 
 
 def _apply_field_filters(qs, model_cls, request):
-    """Apply arbitrary FK field filters from query params (e.g. ?user=UUID, ?wallet__user=UUID)."""
+    """Apply query params as ORM filters: exact fields, FK traversals, and direct-field lookups (e.g. monthly_rent__gte)."""
     direct_field_names = {f.name for f in model_cls._meta.fields}
     fk_field_names = {
         f.name for f in model_cls._meta.fields
@@ -320,17 +343,31 @@ def _apply_field_filters(qs, model_cls, request):
         if param in _FILTER_SKIP_PARAMS or not value:
             continue
 
-        if "__" in param:
-            # One-level join filter: base_field__related_field (e.g. wallet__user)
-            base, _ = param.split("__", 1)
-            if base in fk_field_names:
-                try:
-                    qs = qs.filter(**{param: value})
-                except Exception:
-                    pass
-        elif param in direct_field_names:
+        if param in direct_field_names:
             try:
                 qs = qs.filter(**{param: value})
+            except Exception:
+                pass
+            continue
+
+        if "__" not in param:
+            continue
+
+        base, remainder = param.split("__", 1)
+        if base in fk_field_names:
+            try:
+                qs = qs.filter(**{param: value})
+            except Exception:
+                pass
+            continue
+
+        if base in direct_field_names and "__" not in remainder and remainder in _ALLOWED_DIRECT_LOOKUP_SUFFIXES:
+            try:
+                if remainder == "isnull":
+                    v = value.lower() in ("1", "true", "yes")
+                    qs = qs.filter(**{param: v})
+                else:
+                    qs = qs.filter(**{param: value})
             except Exception:
                 pass
 
@@ -392,11 +429,16 @@ def generic_list_view(request, resource):
     # GET – list
     qs = model_cls.objects.all()
     status_val = request.GET.get("status")
-    query = request.GET.get("q")
+    query = request.GET.get("q") or request.GET.get("search")
     ordering = request.GET.get("ordering", _default_ordering(model_cls))
 
     if status_val and any(f.name == "status" for f in model_cls._meta.fields):
-        qs = qs.filter(status=status_val)
+        if "," in status_val:
+            parts = [s.strip() for s in status_val.split(",") if s.strip()]
+            if parts:
+                qs = qs.filter(status__in=parts)
+        else:
+            qs = qs.filter(status=status_val)
 
     qs = _apply_field_filters(qs, model_cls, request)
     qs = _apply_search(qs, model_cls, query)
