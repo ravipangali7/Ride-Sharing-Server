@@ -196,3 +196,10 @@ JAZZMIN_UI_TWEAKS = {
 MAX_UPLOAD_SIZE = 10 * 1024 * 1024  # 10MB
 FILE_UPLOAD_MAX_MEMORY_SIZE = MAX_UPLOAD_SIZE
 DATA_UPLOAD_MAX_MEMORY_SIZE = MAX_UPLOAD_SIZE
+
+# Node Socket.IO internal HTTP (ride/parcel/bargain pushes). Empty URL disables pushes.
+REALTIME_INTERNAL_BASE_URL = os.environ.get(
+    "REALTIME_INTERNAL_BASE_URL",
+    "http://127.0.0.1:3333",
+).rstrip("/")
+REALTIME_INTERNAL_SECRET = os.environ.get("REALTIME_INTERNAL_SECRET", "")
