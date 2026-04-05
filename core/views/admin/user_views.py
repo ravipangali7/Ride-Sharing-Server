@@ -75,6 +75,7 @@ MODEL_REGISTRY = {
     "app_settings": models.AppSetting,
     "service_charges": models.ServiceChargeConfig,
     "app_versions": models.AppVersionControl,
+    "mobile_app_release": models.MobileAppReleaseConfig,
     "quick_replies": models.QuickReplyTemplate,
     "cancellation_policies": models.CancellationPolicy,
     "admin_users": models.AdminUser,

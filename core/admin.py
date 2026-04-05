@@ -550,6 +550,7 @@ _BULK_REGISTER = (
     models.PopupAdView,
     models.ServiceChargeConfig,
     models.AppVersionControl,
+    models.MobileAppReleaseConfig,
     models.AdminActivityLog,
     models.FoodCategory,
 )

@@ -9,6 +9,7 @@ from core.models import (
     AppSetting,
     CoinRate,
     LoyaltyTier,
+    MobileAppReleaseConfig,
     NotificationTemplate,
     QuickReplyTemplate,
     RiderAchievement,
@@ -177,5 +178,9 @@ class Command(BaseCommand):
                         updated_by=admin,
                     )
                     self.stdout.write(self.style.SUCCESS("CoinRate: default 10 NPR / coin"))
+
+            if not MobileAppReleaseConfig.objects.exists():
+                MobileAppReleaseConfig.objects.create(current_app_version=1)
+                self.stdout.write(self.style.SUCCESS("MobileAppReleaseConfig: default row"))
 
         self.stdout.write(self.style.SUCCESS("seed_bootstrap completed (idempotent)."))

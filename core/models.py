@@ -2076,6 +2076,19 @@ class ServiceChargeConfig(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
 
+class MobileAppReleaseConfig(models.Model):
+    """Singleton row: current Android build code and optional APK in media."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    current_app_version = models.PositiveIntegerField(default=1)
+    android_file = models.FileField(upload_to="releases/", blank=True, null=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Mobile app release"
+        verbose_name_plural = "Mobile app release"
+
+
 class AppVersionControl(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     platform = models.CharField(max_length=10, choices=[("android", "Android"), ("ios", "iOS")])
