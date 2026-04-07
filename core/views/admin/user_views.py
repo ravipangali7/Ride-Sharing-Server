@@ -9,6 +9,14 @@ from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
 from core import models
+from core.views.admin.resource_scope import (
+    ANONYMOUS_GET_RESOURCES,
+    enforce_create_fk,
+    is_staff_user,
+    non_staff_mutation_forbidden,
+    object_visible,
+    scope_queryset,
+)
 
 
 MODEL_REGISTRY = {
@@ -22,10 +30,12 @@ MODEL_REGISTRY = {
     "dispatch_config": models.RiderDispatchConfig,
     "parcels": models.ParcelBooking,
     "parcel_items": models.ParcelItem,
+    "parcel_bargains": models.ParcelBargainOffer,
     "parcel_agents": models.ParcelDeliveryProfile,
     "restaurants": models.Restaurant,
     "food_orders": models.FoodOrder,
     "food_order_items": models.FoodOrderItem,
+    "food_categories": models.FoodCategory,
     "menu_items": models.MenuItem,
     "vendors": models.Vendor,
     "products": models.Product,
@@ -121,6 +131,13 @@ ANNOTATION_REGISTRY = {
     "menu_items": {
         "restaurant_name": F("restaurant__name"),
         "category_name": F("category__name"),
+    },
+    "food_categories": {
+        "restaurant_name": F("restaurant__name"),
+    },
+    "parcel_bargains": {
+        "delivery_person_name": F("delivery_person__user__full_name"),
+        "parcel_status": F("parcel__status"),
     },
     "restaurants": {
         "owner_full_name": F("owner__full_name"),
@@ -413,9 +430,17 @@ def generic_list_view(request, resource):
         raise Http404("Unknown resource")
 
     if request.method == "POST":
+        if not request.user.is_authenticated:
+            return Response({"detail": "Authentication credentials were not provided."}, status=401)
+        if not is_staff_user(request.user) and non_staff_mutation_forbidden(resource):
+            return Response({"error": "Forbidden"}, status=403)
+        if resource == "users" and not is_staff_user(request.user):
+            return Response({"error": "Forbidden"}, status=403)
         allowed = _writable_fields(model_cls)
         fk_map = _fk_attname_map(model_cls)
         payload = dict(request.data)
+        if not is_staff_user(request.user):
+            payload = enforce_create_fk(resource, payload, request.user)
         role_values = payload.pop("roles", None) if resource == "users" else None
         data = _remap_fk_fields(payload, fk_map, allowed)
         try:
@@ -428,7 +453,14 @@ def generic_list_view(request, resource):
             return Response({"error": str(exc)}, status=400)
 
     # GET – list
-    qs = model_cls.objects.all()
+    if resource in ANONYMOUS_GET_RESOURCES:
+        qs = model_cls.objects.all()
+    elif not request.user.is_authenticated:
+        return Response({"detail": "Authentication credentials were not provided."}, status=401)
+    else:
+        qs = model_cls.objects.all()
+        if not is_staff_user(request.user):
+            qs = scope_queryset(resource, qs, request.user)
     status_val = request.GET.get("status")
     query = request.GET.get("q") or request.GET.get("search")
     ordering = request.GET.get("ordering", _default_ordering(model_cls))
@@ -480,14 +512,24 @@ def generic_detail_view(request, resource, pk):
     if not model_cls:
         raise Http404("Unknown resource")
 
+    if not request.user.is_authenticated:
+        return Response({"detail": "Authentication credentials were not provided."}, status=401)
+
     obj = model_cls.objects.filter(pk=pk).first()
     if not obj:
         raise Http404("Not found")
 
+    if not is_staff_user(request.user) and not object_visible(resource, obj, request.user):
+        raise Http404("Not found")
+
     if request.method == "PATCH":
+        if not is_staff_user(request.user) and non_staff_mutation_forbidden(resource):
+            return Response({"error": "Forbidden"}, status=403)
         allowed = _writable_fields(model_cls)
         fk_map = _fk_attname_map(model_cls)
         role_values = request.data.get("roles") if resource == "users" else None
+        if resource == "users" and not is_staff_user(request.user):
+            role_values = None
         update_fields = []
         for key, value in request.data.items():
             if resource == "users" and key == "roles":
@@ -509,6 +551,10 @@ def generic_detail_view(request, resource, pk):
             return Response({"error": str(exc)}, status=400)
 
     if request.method == "DELETE":
+        if not is_staff_user(request.user) and non_staff_mutation_forbidden(resource):
+            return Response({"error": "Forbidden"}, status=403)
+        if resource == "users" and not is_staff_user(request.user):
+            return Response({"error": "Forbidden"}, status=403)
         obj.delete()
         return Response(status=204)
 
@@ -517,6 +563,8 @@ def generic_detail_view(request, resource, pk):
 
 @api_view(["POST"])
 def user_adjust_coins_view(request, pk):
+    if not request.user.is_authenticated or not is_staff_user(request.user):
+        return Response({"error": "Forbidden"}, status=403)
     user = models.User.objects.filter(pk=pk).first()
     if not user:
         raise Http404("Not found")
@@ -565,15 +613,22 @@ def generic_stats_view(request, resource):
     if not model_cls:
         raise Http404("Unknown resource")
 
+    if not request.user.is_authenticated:
+        return Response({"detail": "Authentication credentials were not provided."}, status=401)
+
+    qs = model_cls.objects.all()
+    if not is_staff_user(request.user):
+        qs = scope_queryset(resource, qs, request.user)
+
     field_names = {f.name for f in model_cls._meta.fields}
 
-    total = model_cls.objects.count()
+    total = qs.count()
 
     # Records created today
     today_count = 0
     if "created_at" in field_names:
         try:
-            today_count = model_cls.objects.filter(
+            today_count = qs.filter(
                 created_at__date=timezone.now().date()
             ).count()
         except Exception:
@@ -583,7 +638,7 @@ def generic_stats_view(request, resource):
     by_status: dict = {}
     if "status" in field_names:
         try:
-            rows = model_cls.objects.values("status").annotate(n=Count("id"))
+            rows = qs.values("status").annotate(n=Count("id"))
             by_status = {r["status"]: r["n"] for r in rows if r["status"]}
         except Exception:
             pass
@@ -593,7 +648,7 @@ def generic_stats_view(request, resource):
     for bf in ("is_active", "is_online", "is_approved", "is_open", "is_verified", "is_frozen"):
         if bf in field_names:
             try:
-                bool_counts[bf] = model_cls.objects.filter(**{bf: True}).count()
+                bool_counts[bf] = qs.filter(**{bf: True}).count()
             except Exception:
                 pass
 
@@ -606,7 +661,7 @@ def generic_stats_view(request, resource):
         if mf in field_names:
             amount_field = mf
             try:
-                agg = model_cls.objects.aggregate(s=Sum(mf))
+                agg = qs.aggregate(s=Sum(mf))
                 total_amount = float(agg["s"] or 0)
                 if total > 0:
                     avg_amount = round(total_amount / total, 2)
@@ -615,7 +670,7 @@ def generic_stats_view(request, resource):
             # Today's revenue
             if "created_at" in field_names and today_count > 0:
                 try:
-                    today_agg = model_cls.objects.filter(
+                    today_agg = qs.filter(
                         created_at__date=timezone.now().date()
                     ).aggregate(s=Sum(mf))
                     today_amount = float(today_agg["s"] or 0)
@@ -627,7 +682,7 @@ def generic_stats_view(request, resource):
     out_of_stock = None
     if "stock" in field_names:
         try:
-            out_of_stock = model_cls.objects.filter(stock=0).count()
+            out_of_stock = qs.filter(stock=0).count()
         except Exception:
             pass
 

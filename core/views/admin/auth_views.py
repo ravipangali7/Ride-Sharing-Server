@@ -6,11 +6,12 @@ from datetime import timedelta
 from django.conf import settings
 from django.contrib.auth import authenticate
 from django.utils import timezone
-from rest_framework.decorators import api_view
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from core.models import OTPVerification, User
+from core.models import OTPVerification, User, UserRole
 
 
 def _tokens_for_user(user):
@@ -79,6 +80,11 @@ def customer_register(request):
         password=password,
         full_name=full_name,
         email=request.data.get("email", "").strip() or None,
+    )
+    UserRole.objects.get_or_create(
+        user=user,
+        role="customer",
+        defaults={"is_active": True},
     )
     tokens = _tokens_for_user(user)
     return Response({
@@ -196,8 +202,10 @@ def verify_otp(request):
 
 def _serialize_user(user):
     """Shared user payload for auth responses."""
-    from core.models import UserRole, RiderProfile
-    roles = list(UserRole.objects.filter(user=user).values_list("role", flat=True))
+    from core.models import RiderProfile
+    roles = list(
+        UserRole.objects.filter(user=user, is_active=True).values_list("role", flat=True)
+    )
     has_rider = RiderProfile.objects.filter(user=user).exists()
     return {
         "id": str(user.id),
@@ -215,6 +223,13 @@ def _serialize_user(user):
         "is_staff": user.is_staff,
         "is_superuser": user.is_superuser,
     }
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def customer_me(request):
+    """Return current user (roles, flags) for app refresh after token restore."""
+    return Response(_serialize_user(request.user))
 
 
 @api_view(["POST"])
