@@ -1,7 +1,20 @@
+import json
+
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
 from core import models
+
+
+def _json_app_setting(key: str):
+    """Load optional JSON marketing blobs from AppSetting (value_type=json)."""
+    row = models.AppSetting.objects.filter(key=key, value_type="json").first()
+    if not row or not (row.value or "").strip():
+        return None
+    try:
+        return json.loads(row.value)
+    except json.JSONDecodeError:
+        return None
 
 
 @api_view(["GET"])
@@ -29,5 +42,10 @@ def website_home_summary(request):
             .order_by("-created_at")[:8]
         ),
         "promos": list(models.PromoCode.objects.filter(is_active=True).values("id", "code", "promo_type", "discount_value")[:8]),
+        "marketing": {
+            "services": _json_app_setting("website_marketing_services"),
+            "features": _json_app_setting("website_marketing_features"),
+            "testimonials": _json_app_setting("website_marketing_testimonials"),
+        },
     }
     return Response(payload)
