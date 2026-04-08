@@ -421,6 +421,38 @@ def _remap_fk_fields(data, fk_map, allowed):
     return result
 
 
+def _normalize_request_payload(request):
+    """Return a plain dict from request.data with multipart list-values flattened.
+
+    DRF multipart payloads can produce QueryDict-like data where `dict(request.data)`
+    yields values as lists (including UploadedFile lists). That breaks model create/
+    serialize paths expecting scalar values for single-value fields.
+    """
+    src = request.data
+    out = {}
+    # QueryDict / MultiValueDict path
+    if hasattr(src, "lists"):
+        for key, values in src.lists():
+            if isinstance(values, (list, tuple)):
+                if not values:
+                    out[key] = None
+                else:
+                    out[key] = values[-1] if len(values) == 1 else list(values)
+            else:
+                out[key] = values
+        return out
+    # Fallback for plain mapping payloads (JSON, etc.)
+    for key, value in dict(src).items():
+        if isinstance(value, (list, tuple)):
+            if not value:
+                out[key] = None
+            else:
+                out[key] = value[-1] if len(value) == 1 else list(value)
+        else:
+            out[key] = value
+    return out
+
+
 # ─── List + Create ────────────────────────────────────────────────────────────
 
 @api_view(["GET", "POST"])
@@ -438,7 +470,7 @@ def generic_list_view(request, resource):
             return Response({"error": "Forbidden"}, status=403)
         allowed = _writable_fields(model_cls)
         fk_map = _fk_attname_map(model_cls)
-        payload = dict(request.data)
+        payload = _normalize_request_payload(request)
         if not is_staff_user(request.user):
             payload = enforce_create_fk(resource, payload, request.user)
         role_values = payload.pop("roles", None) if resource == "users" else None
