@@ -250,6 +250,10 @@ def enforce_create_fk(resource: str, data: dict, user) -> dict:
     elif resource == "food_orders":
         if "customer_id" not in out:
             out["customer_id"] = str(user.pk)
+    elif resource == "food_order_items":
+        oid = out.get("order_id") or out.get("order")
+        if oid and not m.FoodOrder.objects.filter(pk=oid, customer=user).exists():
+            raise ValueError("Food order not found or does not belong to you")
     elif resource == "ecommerce_orders":
         if "customer_id" not in out:
             out["customer_id"] = str(user.pk)

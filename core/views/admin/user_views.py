@@ -9,6 +9,12 @@ from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
 from core import models
+from core.services.ecommerce_order_ops import (
+    normalize_ecommerce_order_delivery_for_customer,
+    recalculate_ecommerce_order_totals,
+    touch_delivered_at_if_needed,
+    validate_ecommerce_order_item_create,
+)
 from core.views.admin.resource_scope import (
     ANONYMOUS_GET_RESOURCES,
     enforce_create_fk,
@@ -118,6 +124,7 @@ ANNOTATION_REGISTRY = {
     },
     "ecommerce_orders": {
         "customer_full_name": F("customer__full_name"),
+        "customer_phone": F("customer__phone"),
         "vendor_store_name": F("vendor__store_name"),
         "items_count": Count("items", distinct=True),
     },
@@ -152,6 +159,7 @@ ANNOTATION_REGISTRY = {
     "products": {
         "vendor_store_name": F("vendor__store_name"),
         "category_name": F("category__name"),
+        "vendor_delivery_charge": F("vendor__delivery_charge"),
     },
     "product_categories": {
         "parent_name": F("parent__name"),
@@ -338,6 +346,24 @@ def _serialize_item(obj, extra_annotation_keys=None):
     return result
 
 
+def _enrich_ecommerce_order_detail(obj: models.EcommerceOrder, result: dict) -> dict:
+    if obj.customer_id:
+        u = models.User.objects.filter(pk=obj.customer_id).only("phone", "full_name").first()
+        if u:
+            if not result.get("customer_full_name"):
+                result["customer_full_name"] = u.full_name
+            result["customer_phone"] = u.phone or ""
+    return result
+
+
+def _enrich_product_detail(obj: models.Product, result: dict) -> dict:
+    if obj.vendor_id:
+        v = models.Vendor.objects.filter(pk=obj.vendor_id).only("delivery_charge").first()
+        if v:
+            result["vendor_delivery_charge"] = float(v.delivery_charge)
+    return result
+
+
 def _default_ordering(model_cls):
     field_names = {f.name for f in model_cls._meta.fields}
     if "created_at" in field_names:
@@ -497,9 +523,17 @@ def generic_list_view(request, resource):
             payload = enforce_create_fk(resource, payload, request.user)
         role_values = payload.pop("roles", None) if resource == "users" else None
         data = _remap_fk_fields(payload, fk_map, allowed)
+        if resource == "ecommerce_orders" and not is_staff_user(request.user):
+            data = normalize_ecommerce_order_delivery_for_customer(data)
         try:
             with transaction.atomic():
+                if resource == "ecommerce_order_items":
+                    validate_ecommerce_order_item_create(
+                        data, request.user, acting_as_staff=is_staff_user(request.user)
+                    )
                 obj = model_cls.objects.create(**data)
+                if resource == "ecommerce_order_items":
+                    recalculate_ecommerce_order_totals(obj.order_id)
                 if resource == "users":
                     _sync_user_roles(obj, role_values)
             return Response(_serialize_item(obj), status=201)
@@ -586,6 +620,7 @@ def generic_detail_view(request, resource, pk):
         if resource == "users" and not is_staff_user(request.user):
             role_values = None
         data = _remap_fk_fields(payload, fk_map, allowed)
+        prev_ecom_status = obj.status if resource == "ecommerce_orders" else None
         update_fields = []
         for key, value in data.items():
             if key not in allowed and key not in set(fk_map.values()):
@@ -595,9 +630,17 @@ def generic_detail_view(request, resource, pk):
         try:
             with transaction.atomic():
                 obj.save(update_fields=update_fields if update_fields else None)
+                if resource == "ecommerce_orders":
+                    touch_delivered_at_if_needed(obj, prev_ecom_status)
+                    obj.refresh_from_db()
                 if resource == "users":
                     _sync_user_roles(obj, role_values)
-            return Response(_serialize_item(obj))
+            out = _serialize_item(obj)
+            if resource == "ecommerce_orders":
+                out = _enrich_ecommerce_order_detail(obj, out)
+            elif resource == "products":
+                out = _enrich_product_detail(obj, out)
+            return Response(out)
         except Exception as exc:
             return Response({"error": str(exc)}, status=400)
 
@@ -609,7 +652,12 @@ def generic_detail_view(request, resource, pk):
         obj.delete()
         return Response(status=204)
 
-    return Response(_serialize_item(obj))
+    out = _serialize_item(obj)
+    if model_cls == models.EcommerceOrder:
+        out = _enrich_ecommerce_order_detail(obj, out)
+    elif model_cls == models.Product:
+        out = _enrich_product_detail(obj, out)
+    return Response(out)
 
 
 @api_view(["POST"])

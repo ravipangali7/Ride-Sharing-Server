@@ -6,8 +6,11 @@ from __future__ import annotations
 
 import logging
 
+from decimal import Decimal
+
 from django.db import transaction
-from django.db.models.signals import post_save
+from django.db.models import Sum
+from django.db.models.signals import post_delete, post_save
 from django.dispatch import receiver
 
 from core import models
@@ -100,6 +103,39 @@ def _schedule_ecommerce_parcel(order_id):
             logger.exception("Ecommerce parcel creation failed for %s", order_id)
 
     transaction.on_commit(_run)
+
+
+def _recalc_food_order_totals(order_id):
+    """Recompute subtotal / total from line items (avoids FoodOrder.save → parcel noise)."""
+
+    def _run():
+        try:
+            with transaction.atomic():
+                order = models.FoodOrder.objects.select_for_update().get(pk=order_id)
+                agg = order.items.aggregate(s=Sum("total_price"))
+                subtotal = agg["s"] or Decimal("0")
+                total = subtotal + order.delivery_charge
+                if order.subtotal != subtotal or order.total_amount != total:
+                    models.FoodOrder.objects.filter(pk=order.pk).update(
+                        subtotal=subtotal,
+                        total_amount=total,
+                    )
+        except models.FoodOrder.DoesNotExist:
+            pass
+
+    transaction.on_commit(_run)
+
+
+@receiver(post_save, sender=models.FoodOrderItem)
+def food_order_item_recalc_on_save(sender, instance, **kwargs):
+    if kwargs.get("raw"):
+        return
+    _recalc_food_order_totals(instance.order_id)
+
+
+@receiver(post_delete, sender=models.FoodOrderItem)
+def food_order_item_recalc_on_delete(sender, instance, **kwargs):
+    _recalc_food_order_totals(instance.order_id)
 
 
 @receiver(post_save, sender=models.FoodOrder)
