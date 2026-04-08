@@ -114,10 +114,12 @@ ANNOTATION_REGISTRY = {
     "food_orders": {
         "customer_full_name": F("customer__full_name"),
         "restaurant_name": F("restaurant__name"),
+        "items_count": Count("items", distinct=True),
     },
     "ecommerce_orders": {
         "customer_full_name": F("customer__full_name"),
         "vendor_store_name": F("vendor__store_name"),
+        "items_count": Count("items", distinct=True),
     },
     "parcels": {
         "sender_full_name": F("sender__full_name"),
@@ -151,9 +153,26 @@ ANNOTATION_REGISTRY = {
         "vendor_store_name": F("vendor__store_name"),
         "category_name": F("category__name"),
     },
+    "product_categories": {
+        "parent_name": F("parent__name"),
+    },
     "room_listings": {
         "owner_display_name": F("owner__full_name"),
         "owner_phone": F("owner__phone"),
+    },
+    "room_owners": {
+        "user_full_name": F("user__full_name"),
+        "user_phone": F("user__phone"),
+    },
+    "room_inquiries": {
+        "room_title": F("room__title"),
+        "customer_full_name": F("customer__full_name"),
+        "customer_phone": F("customer__phone"),
+    },
+    "room_requests": {
+        "room_title": F("room__title"),
+        "customer_full_name": F("customer__full_name"),
+        "customer_phone": F("customer__phone"),
     },
     "topups": {
         "user_full_name": F("user__full_name"),
@@ -562,20 +581,17 @@ def generic_detail_view(request, resource, pk):
             return Response({"error": "Forbidden"}, status=403)
         allowed = _writable_fields(model_cls)
         fk_map = _fk_attname_map(model_cls)
-        role_values = request.data.get("roles") if resource == "users" else None
+        payload = _normalize_request_payload(request)
+        role_values = payload.pop("roles", None) if resource == "users" else None
         if resource == "users" and not is_staff_user(request.user):
             role_values = None
+        data = _remap_fk_fields(payload, fk_map, allowed)
         update_fields = []
-        for key, value in request.data.items():
-            if resource == "users" and key == "roles":
+        for key, value in data.items():
+            if key not in allowed and key not in set(fk_map.values()):
                 continue
-            if key in fk_map:
-                attname = fk_map[key]
-                setattr(obj, attname, value)
-                update_fields.append(attname)
-            elif key in allowed:
-                setattr(obj, key, value)
-                update_fields.append(key)
+            setattr(obj, key, value)
+            update_fields.append(key)
         try:
             with transaction.atomic():
                 obj.save(update_fields=update_fields if update_fields else None)
