@@ -412,10 +412,13 @@ def _fk_attname_map(model_cls):
 
 def _remap_fk_fields(data, fk_map, allowed):
     """Remap FK field names to their _id attnames so Django accepts UUID values directly."""
+    fk_attnames = set(fk_map.values())
     result = {}
     for k, v in data.items():
         if k in fk_map:
             result[fk_map[k]] = v
+        elif k in fk_attnames:
+            result[k] = v
         elif k in allowed:
             result[k] = v
     return result
