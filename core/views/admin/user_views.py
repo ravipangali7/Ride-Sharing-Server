@@ -291,7 +291,11 @@ def _get_user_roles(user_id):
 def _sync_user_roles(user, roles):
     if roles is None:
         return
-    desired = [r for r in roles if isinstance(r, str)]
+    # Accept a single role string (some clients) or a list; never iterate a str as chars.
+    if isinstance(roles, str):
+        desired = [roles] if roles.strip() else []
+    else:
+        desired = [r for r in roles if isinstance(r, str)]
     desired_set = set(desired) & _allowed_user_roles()
     existing_qs = models.UserRole.objects.filter(user=user)
     existing_map = {row.role: row for row in existing_qs}
@@ -469,6 +473,10 @@ def _remap_fk_fields(data, fk_map, allowed):
     return result
 
 
+# Keys that must remain real lists even when only one element (e.g. JSON ["restaurant"]).
+_PAYLOAD_LIST_KEYS = frozenset({"roles"})
+
+
 def _normalize_request_payload(request):
     """Return a plain dict from request.data with multipart list-values flattened.
 
@@ -482,7 +490,9 @@ def _normalize_request_payload(request):
     if hasattr(src, "lists"):
         for key, values in src.lists():
             if isinstance(values, (list, tuple)):
-                if not values:
+                if key in _PAYLOAD_LIST_KEYS:
+                    out[key] = list(values)
+                elif not values:
                     out[key] = None
                 else:
                     out[key] = values[-1] if len(values) == 1 else list(values)
@@ -492,7 +502,9 @@ def _normalize_request_payload(request):
     # Fallback for plain mapping payloads (JSON, etc.)
     for key, value in dict(src).items():
         if isinstance(value, (list, tuple)):
-            if not value:
+            if key in _PAYLOAD_LIST_KEYS:
+                out[key] = list(value)
+            elif not value:
                 out[key] = None
             else:
                 out[key] = value[-1] if len(value) == 1 else list(value)
